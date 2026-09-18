@@ -7,7 +7,7 @@ and wire ingestion -> extraction -> resolution -> storage -> graph
 import os
 import pandas as pd
 
-from graph_analysis import GraphAnalyzer
+from Graph2_analysis import GraphAnalyzer
 from evidence_engine import build_alerts_from_detection_results
 from resolution import run_resolution, convert_seed_to_raw_format, combine_extraction_sources
 
