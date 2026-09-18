@@ -1,5 +1,5 @@
 """
-Graph2_analysis.py
+graph_analysis.py
 Project: Anveshak
 
 Module  - Database & Graph
@@ -33,8 +33,7 @@ class GraphAnalyzer:
     """
 
     def __init__(self, db_config=None, csv_path=None):
-        if db_config is None and csv_path is None:
-            raise ValueError("Provide either db_config or csv_path.")
+        
         self.db_config = db_config
         self.csv_path = csv_path
         self.G = None          # MultiDiGraph - full graph, all relation types
@@ -92,14 +91,14 @@ class GraphAnalyzer:
             if pd.isna(row["source_entity_id"]) or pd.isna(row["target_entity_id"]):
                 continue
 
-        G.add_edge(
-            row["source_entity_id"],
-            row["target_entity_id"],
-            relation=row["type"],
-            confidence=row["confidence"],
-            source_doc=row["source_document_id"],
-            context=row["context"],
-        )
+            G.add_edge(
+                row["source_entity_id"],
+                row["target_entity_id"],
+                relation=row["type"],
+                confidence=row["confidence"],
+                source_doc=row["source_document_id"],
+                context=row["context"],
+            )
 
         self.G = G
         self.G_simple = nx.Graph(G)
@@ -112,6 +111,10 @@ class GraphAnalyzer:
         
         if self.db_config is not None:
             rel_df = self._fetch_relationships_from_db()
+
+        elif self.csv_path is not None:
+            rel_df = self._fetch_relationships_from_csv()
+
         else:
             rel_df = self._fetch_relationships_from_csv()
 
@@ -270,7 +273,8 @@ class GraphAnalyzer:
 
 
 # ==========================================================================
-# DEMO / LOCAL TEST 
+# DEMO / LOCAL TEST - only runs if this file is executed directly,
+# not when imported by a teammate's code
 # ==========================================================================
 if __name__ == "__main__":
     # For local testing, use the CSV. Once DB schema is live, swap to:
