@@ -144,15 +144,15 @@ def run_pipeline(data_dir: str = "."):
     final_rows = []
     for v in merged.values():
         final_rows.append({
-            "Name A": v["Name A"],
-            "Name B": v["Name B"],
-            "Relation": ", ".join(sorted(v["Relation"])),
-            "Source ID": v["Source ID"],
-            "Context": " | ".join(sorted(v["Context"])),
-            "Confidence": round(v["Confidence"], 2)
+            "source_entity_id": v["source_entity_id"],
+            "target_entity_id": v["target_entity_id"],
+            "relationship_type": ", ".join(sorted(v["relationship_type"])),
+            "source_document_id": v["source_document_id"],
+            "context": " | ".join(sorted(v["context"])),
+            "confidence": round(v["confidence"], 2)
         })
 
-    final_rows.sort(key=lambda x: x["Source ID"])
+    final_rows.sort(key=lambda x: x["source_document_id"])
     return final_rows
 
 
