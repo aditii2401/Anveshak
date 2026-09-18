@@ -1,4 +1,3 @@
-
 import uuid
 
 
@@ -42,7 +41,7 @@ def make_alert(entity_id, entity_name, rule_type, confidence, metrics, evidence_
 
 def build_alerts_from_detection_results(detection_results, entity_name_lookup=None):
     """
-     list of clean alert objects.
+    Returns a list of clean alert objects.
     """
     entity_name_lookup = entity_name_lookup or {}
     alerts = []
@@ -57,7 +56,7 @@ def build_alerts_from_detection_results(detection_results, entity_name_lookup=No
                 entity_id=entity_id,
                 entity_name=name_of(entity_id),
                 rule_type="CIRCULAR_FLOW",
-                confidence=0.9,  # rule-based, deterministic -> high fixed confidence
+                confidence=0.9,
                 metrics={"cycle_length": len(cycle), "cycle_path": cycle},
                 evidence_list=[{
                     "source_type": "transaction_graph",
@@ -72,7 +71,7 @@ def build_alerts_from_detection_results(detection_results, entity_name_lookup=No
             entity_id=entity_id,
             entity_name=name_of(entity_id),
             rule_type="BRIDGE_ENTITY",
-            confidence=round(min(score * 10, 1.0), 2),  # scaled, capped at 1.0
+            confidence=round(min(score * 10, 1.0), 2),
             metrics={"betweenness": score},
             evidence_list=[{
                 "source_type": "graph_metric",
@@ -102,7 +101,7 @@ def build_alerts_from_detection_results(detection_results, entity_name_lookup=No
             entity_id=entity_id,
             entity_name=name_of(entity_id),
             rule_type="CROSSOVER",
-            confidence=round(len(sources) / 3, 2),  # more sources -> higher confidence, capped near 1.0
+            confidence=round(len(sources) / 3, 2),
             metrics={"sources": list(sources)},
             evidence_list=[{
                 "source_type": "cross_reference",
@@ -112,17 +111,3 @@ def build_alerts_from_detection_results(detection_results, entity_name_lookup=No
         ))
 
     return alerts
-
-
-if __name__ == "__main__":
-    # Quick local test using graph_analysis.py's demo output
-    from graph_analysis import GraphAnalyzer
-
-    analyzer = GraphAnalyzer(csv_path=r"E:\SIH26\data\relationships_seed.csv")
-    analyzer.build_graph()
-    results = analyzer.run_all_detections()
-
-    alerts = build_alerts_from_detection_results(results)
-    for alert in alerts:
-        print(alert)
-        print()

@@ -1,26 +1,16 @@
-"""
-Handle file uploads (FIR text, CDR CSV, transaction CSV) with validation, 
-and wire ingestion -> extraction -> resolution -> storage -> graph
--> detection -> evidence into one runnable pipeline.
-"""
-
 import os
 import pandas as pd
 
-from Graph2_analysis import GraphAnalyzer
+from graph_analysis import GraphAnalyzer
 from evidence_engine import build_alerts_from_detection_results
-from resolution import run_resolution, convert_seed_to_raw_format, combine_extraction_sources
+from resolution import run_resolution
 
 
-# ==========================================================================
-#  FILE UPLOAD VALIDATION
-# ==========================================================================
 class ValidationError(Exception):
     pass
 
 
 def validate_fir_upload(file_path):
-    
     if not os.path.exists(file_path):
         raise ValidationError(f"FIR file not found: {file_path}")
     if not file_path.lower().endswith(".txt"):
@@ -31,7 +21,6 @@ def validate_fir_upload(file_path):
 
 
 def validate_csv_upload(file_path, required_columns):
-
     if not os.path.exists(file_path):
         raise ValidationError(f"CSV file not found: {file_path}")
     try:
@@ -49,11 +38,7 @@ def validate_csv_upload(file_path, required_columns):
     return df
 
 
-# ==========================================================================
-# PLACEHOLDERS 
-# ==========================================================================
 def run_extraction(extraction_output_path):
-   
     df = pd.read_csv(extraction_output_path)
     required = {"Name A", "Name B", "Relation", "Source ID", "Context", "Confidence"}
     missing = required - set(df.columns)
@@ -62,13 +47,7 @@ def run_extraction(extraction_output_path):
     return df
 
 
-def run_resolution_stage(raw_extraction_df, threshold=80):
-    
-    return run_resolution(raw_extraction_df, threshold=threshold)
-
-
 def store_to_database(resolved_df, entity_name_lookup, db_config):
-  
     try:
         import psycopg2
     except ImportError:
@@ -78,7 +57,6 @@ def store_to_database(resolved_df, entity_name_lookup, db_config):
     cur = conn.cursor()
 
     try:
-        # Insert canonical entities first (relationships reference these)
         for entity_id, display_name in entity_name_lookup.items():
             cur.execute(
                 """
@@ -88,7 +66,6 @@ def store_to_database(resolved_df, entity_name_lookup, db_config):
                 (entity_id, display_name)
             )
 
-        # Insert relationships
         for _, row in resolved_df.iterrows():
             cur.execute(
                 """
@@ -111,11 +88,7 @@ def store_to_database(resolved_df, entity_name_lookup, db_config):
         conn.close()
 
 
-# ==========================================================================
-#  GRAPH -> DETECTION -> EVIDENCE 
-# ==========================================================================
 def run_graph_and_detection(db_config=None, csv_path=None, resolved_df=None, entity_name_lookup=None):
-    
     analyzer = GraphAnalyzer(db_config=db_config, csv_path=csv_path)
     if resolved_df is not None:
         analyzer.load_from_dataframe(resolved_df)
@@ -124,73 +97,3 @@ def run_graph_and_detection(db_config=None, csv_path=None, resolved_df=None, ent
     detection_results = analyzer.run_all_detections()
     alerts = build_alerts_from_detection_results(detection_results, entity_name_lookup)
     return alerts, analyzer
-
-
-# ==========================================================================
-# FULL PIPELINE ENTRY POINT
-# ==========================================================================
-def run_full_pipeline(fir_path, cdr_path, transactions_path, extraction_output_path,
-                       seed_relationships_path=None, persons_path=None, db_config=None):
-    
-    print("Stage 0: Validating uploads...")
-    validate_fir_upload(fir_path)
-    validate_csv_upload(cdr_path, required_columns=["caller_phone", "receiver_phone", "timestamp"])
-    validate_csv_upload(transactions_path, required_columns=["sender_account", "receiver_account", "amount_inr"])
-    print("  All uploads valid.")
-
-    print("Stage 1: Loading extraction output...")
-    raw_extraction_df = run_extraction(extraction_output_path)
-    print(f"  {len(raw_extraction_df)} social relationship rows loaded (FIR text).")
-
-    if seed_relationships_path is not None and persons_path is not None:
-        print("Stage 1b: Merging in financial/communication relationships...")
-        seed_df = pd.read_csv(seed_relationships_path)
-        persons_df = pd.read_csv(persons_path)
-        seed_as_raw = convert_seed_to_raw_format(seed_df, persons_df)
-        raw_extraction_df = combine_extraction_sources(raw_extraction_df, seed_as_raw)
-        print(f"  Combined total: {len(raw_extraction_df)} relationship rows "
-              f"(now includes TRANSFERRED/CONTACTED).")
-
-    print("Stage 2: Resolving entities...")
-    resolved_df, entity_name_lookup = run_resolution_stage(raw_extraction_df)
-    print(f"  Resolved to {len(entity_name_lookup)} canonical entities, "
-          f"{len(resolved_df)} relationships after removing self-loops.")
-
-    print("Stage 3: Storage")
-    if db_config is not None:
-        try:
-            store_to_database(resolved_df, entity_name_lookup, db_config)
-        except Exception as e:
-            print(f"  DB storage failed ({e}) - continuing with in-memory data for graph stage.")
-    else:
-        print("  No db_config provided - feeding resolved data directly into graph.")
-
-    print("Stage 4-6: Graph -> Detection -> Evidence")
-    alerts, analyzer = run_graph_and_detection(resolved_df=resolved_df, entity_name_lookup=entity_name_lookup)
-    print(f"  {len(alerts)} alerts generated.")
-
-    return alerts, entity_name_lookup
-
-
-if __name__ == "__main__":
-    
-    fir_path = r"E:\SIH26\data\fir_records.txt"
-    cdr_path = r"E:\SIH26\data\cdr.csv"
-    txn_path = r"E:\SIH26\data\transactions.csv"
-    extraction_output_path = r"E:\SIH26\data\relationships_output_1.csv"
-    seed_relationships_path = r"E:\SIH26\data\relationships_seed.csv"
-    persons_path = r"E:\SIH26\data\persons.csv"
-
-    alerts, name_lookup = run_full_pipeline(
-        fir_path=fir_path,
-        cdr_path=cdr_path,
-        transactions_path=txn_path,
-        extraction_output_path=extraction_output_path,
-        seed_relationships_path=seed_relationships_path,
-        persons_path=persons_path,
-    )
-
-    print()
-    print("=== Final alerts ===")
-    for a in alerts:
-        print(" -", a["reason_text"])

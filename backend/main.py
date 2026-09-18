@@ -3,43 +3,25 @@ import os
 import shutil
 import zipfile
 import psycopg2
-from graph_analysis import GraphAnalyzer
+import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, status, Depends
+from pydantic import BaseModel
 
-# Import the main pipeline execution function directly from sih_6_2.py
+# Pipeline & Module Imports
 from sih_6_2 import run_pipeline
+from resolution import run_resolution
+from graph_analysis import GraphAnalyzer
+from evidence_engine import build_alerts_from_detection_results
+from lyzr_chat import call_lyzr_agent
 
 app = FastAPI(title="UNRAVEL Criminal Network Router")
 
 load_dotenv()
-
-# Get the Neon connection URL from .env
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from lyzr_chat import call_lyzr_agent
 
-app = FastAPI()
-
-class ChatRequest(BaseModel):
-    message: str
-    user_id: str = "aniruddhasharma141104@gmail.com"
-    session_id: str = "6aabf939be73873d04ecd627-950i7xmw"
-
-@app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
-    try:
-        response_data = await call_lyzr_agent(
-            message=request.message,
-            user_id=request.user_id,
-            session_id=request.session_id
-        )
-        return response_data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# --- Database Connection Dependency ---
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     try:
@@ -48,7 +30,7 @@ def get_db():
         conn.close()
 
 
-# Ensure audit_ingestion_logs table exists in Neon on server startup
+# --- Database Startup Initialization ---
 @app.on_event("startup")
 def init_db():
     if not DATABASE_URL:
@@ -83,12 +65,7 @@ def write_logbook(db_conn, filename: str, status_msg: str, error_msg: str = None
     db_conn.commit()
 
 
-# ---------------------------------------------------------------------------
-# Filename normalization + validation
-# ---------------------------------------------------------------------------
-# Keyword -> exact filename that sih_6_2.run_pipeline() expects to find.
-# The first keyword that matches (case-insensitive substring) inside an
-# uploaded filename wins, so upload names don't have to be exact.
+# --- Filename Normalization Helpers ---
 FILENAME_KEYWORDS = {
     "person": "persons.csv",
     "phone": "phones.csv",
@@ -100,20 +77,11 @@ FILENAME_KEYWORDS = {
     "fir": "fir_records.txt",
 }
 
-# Files the pipeline can genuinely run without (it just skips that section).
-OPTIONAL_TARGETS = set()
-
-# All possible target files the pipeline looks for.
 ALL_TARGETS = set(FILENAME_KEYWORDS.values())
+OPTIONAL_TARGETS = set()
 
 
 def normalize_filenames(extracted_files: list[str]) -> list[str]:
-    """
-    Given the list of filenames actually extracted from the upload,
-    copy/rename each one (where possible) to the exact filename
-    sih_6_2.run_pipeline() expects, based on keyword matching.
-    Returns the list of target filenames that were successfully resolved.
-    """
     resolved = set()
     for fname in extracted_files:
         lower = fname.lower()
@@ -127,21 +95,34 @@ def normalize_filenames(extracted_files: list[str]) -> list[str]:
 
 
 def validate_required_files(resolved_targets: list[str]) -> list[str]:
-    """
-    Returns a list of required target filenames that are still missing
-    after normalization. An empty list means everything needed is present.
-    """
     required = ALL_TARGETS - OPTIONAL_TARGETS
-    missing = sorted(required - set(resolved_targets))
-    return missing
+    return sorted(required - set(resolved_targets))
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# --- Pydantic Schema for Chat ---
+class ChatRequest(BaseModel):
+    message: str
+    user_id: str = "aniruddhasharma141104@gmail.com"
+    session_id: str = "6aabf939be73873d04ecd627-950i7xmw"
+
+
+# --- API Routes ---
 @app.get("/")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/chat")
+async def chat_endpoint(request: ChatRequest):
+    try:
+        response_data = await call_lyzr_agent(
+            message=request.message,
+            user_id=request.user_id,
+            session_id=request.session_id
+        )
+        return response_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/upload", status_code=status.HTTP_200_OK)
@@ -156,7 +137,6 @@ async def route_raw_files(
     extracted_files = []
 
     try:
-        # 1. Save uploaded file/unzip contents into local workspace (Retained for testing)
         if ext == ".zip":
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
                 for member_name in z.namelist():
@@ -170,13 +150,7 @@ async def route_raw_files(
                 f.write(file_bytes)
             extracted_files.append(filename)
 
-        # 2. Normalize filenames so the pipeline can find them regardless of
-        #    exactly how the user named the files inside the upload.
         resolved_targets = normalize_filenames(extracted_files)
-
-        # 3. Fail loudly with a clear message if something required is
-        #    genuinely missing, instead of letting run_pipeline() silently
-        #    skip a section or crash with a cryptic KeyError.
         missing = validate_required_files(resolved_targets)
         if missing:
             raise ValueError(
@@ -184,10 +158,7 @@ async def route_raw_files(
                 f"Uploaded files were: {', '.join(extracted_files)}"
             )
 
-        # 4. Call pipeline function directly
         extracted_results = run_pipeline(data_dir=".")
-
-        # 5. Log audit entry in Neon PostgreSQL
         write_logbook(db, filename, "PROCESSED_SUCCESSFULLY")
 
         return {
@@ -205,14 +176,14 @@ async def route_raw_files(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Pipeline execution error: {str(err)}"
         )
-# ===================================================================
-# Graph Analysis & Alert Generation Endpoint
-# ===================================================================
+
+
 @app.post("/api/analyze-graph", status_code=status.HTTP_200_OK)
 async def run_graph_analysis():
     """
-    Triggers NetworkX graph construction from the Neon PostgreSQL database
-    and executes all four criminal network detection rules.
+    Fetches raw relationships from PostgreSQL, applies entity resolution 
+    for name deduplication, builds NetworkX graph, executes detections, 
+    and returns structured alerts with evidence snippets.
     """
     if not DATABASE_URL:
         raise HTTPException(
@@ -221,20 +192,50 @@ async def run_graph_analysis():
         )
 
     try:
-        # Pass the Neon DATABASE_URL directly as a string to GraphAnalyzer
+        # 1. Fetch raw relationship rows from DB
         analyzer = GraphAnalyzer(db_config=DATABASE_URL)
+        raw_df = analyzer._fetch_relationships_from_db()
 
-        # Build graph from 'relationships' table in Neon
-        analyzer.build_graph()
+        # 2. Map DB column headers to match Entity Resolution input expectations
+        mapped_df = raw_df.rename(columns={
+            "source_entity_id": "Name A",
+            "target_entity_id": "Name B",
+            "type": "Relation",
+            "source_document_id": "Source ID",
+            "context": "Context",
+            "confidence": "Confidence"
+        })
 
-        # Execute graph analysis rules
+        # 3. Run Entity Resolution to canonicalize entity IDs & display names
+        resolved_df, name_lookup = run_resolution(mapped_df)
+
+        # 4. Map back to NetworkX schema before graph construction
+        graph_df = resolved_df.rename(columns={
+            "Name A": "source_entity_id",
+            "Name B": "target_entity_id",
+            "Relation": "type",
+            "Source ID": "source_document_id",
+            "Context": "context",
+            "Confidence": "confidence"
+        })
+
+        # 5. Load resolved data into NetworkX & perform detections
+        analyzer.load_from_dataframe(graph_df)
         detection_results = analyzer.run_all_detections()
+
+        # 6. Generate structured alert cards using evidence engine
+        alerts = build_alerts_from_detection_results(
+            detection_results, 
+            entity_name_lookup=name_lookup
+        )
 
         return {
             "status": "SUCCESS",
             "nodes_count": analyzer.G.number_of_nodes(),
             "edges_count": analyzer.G.number_of_edges(),
-            "analysis_results": detection_results,
+            "alerts_count": len(alerts),
+            "alerts": alerts,
+            "raw_analysis": detection_results
         }
 
     except Exception as e:
@@ -242,4 +243,3 @@ async def run_graph_analysis():
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Graph analysis failed: {str(e)}",
         )
-   
