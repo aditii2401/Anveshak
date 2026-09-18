@@ -1,5 +1,5 @@
 """
-graph_analysis.py
+Graph2_analysis.py
 Project: Anveshak
 
 Module  - Database & Graph
@@ -44,12 +44,7 @@ class GraphAnalyzer:
     # DATA LOADING
     # ------------------------------------------------------------------
     def _fetch_relationships_from_db(self):
-        """
-        Pulls relationship rows from PostgreSQL.
-        Expects a 'relationships' table with columns matching the project schema:
-        source_entity_id, target_entity_id, relationship_type, confidence,
-        source_document_id, context
-        """
+      
         if not PSYCOPG2_AVAILABLE:
             raise ImportError("psycopg2 is not installed. Run: pip install psycopg2-binary")
 
@@ -71,17 +66,50 @@ class GraphAnalyzer:
 
     def _fetch_relationships_from_csv(self):
         return pd.read_csv(self.csv_path)
+        
+    def load_from_dataframe(self, resolved_df):
+    
+        required_cols = {
+        "source_entity_id",
+        "target_entity_id",
+        "type",
+        "confidence",
+        "source_document_id",
+        "context"
+        }
 
+        missing = required_cols - set(resolved_df.columns)
+
+        if missing:
+            raise ValueError(
+                f"Relationship DataFrame is missing required columns: {missing}"
+            )
+
+        G = nx.MultiDiGraph()
+
+        for _, row in resolved_df.iterrows():
+
+            if pd.isna(row["source_entity_id"]) or pd.isna(row["target_entity_id"]):
+                continue
+
+        G.add_edge(
+            row["source_entity_id"],
+            row["target_entity_id"],
+            relation=row["type"],
+            confidence=row["confidence"],
+            source_doc=row["source_document_id"],
+            context=row["context"],
+        )
+
+        self.G = G
+        self.G_simple = nx.Graph(G)
+
+        return self.G
     # ------------------------------------------------------------------
     # GRAPH CONSTRUCTION
     # ------------------------------------------------------------------
     def build_graph(self):
-        """
-        Builds a directed MultiDiGraph from relationship rows.
-        Directed: TRANSFERRED / CONTACTED are directional relationships.
-        Multi: the same pair of entities can have more than one relationship
-               (e.g. both CONTACTED and TRANSFERRED), and we must not lose any.
-        """
+        
         if self.db_config is not None:
             rel_df = self._fetch_relationships_from_db()
         else:
@@ -242,8 +270,7 @@ class GraphAnalyzer:
 
 
 # ==========================================================================
-# DEMO / LOCAL TEST - only runs if this file is executed directly,
-# not when imported by a teammate's code
+# DEMO / LOCAL TEST 
 # ==========================================================================
 if __name__ == "__main__":
     # For local testing, use the CSV. Once DB schema is live, swap to:
