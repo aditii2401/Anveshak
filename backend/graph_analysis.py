@@ -58,8 +58,9 @@ class GraphAnalyzer:
                    confidence, source_document_id, context
             FROM relationships;
         """
+        import os
         try:
-            import os
+            
             db_url = self.db_config if isinstance(self.db_config, str) else os.getenv("DATABASE_URL")
             conn = psycopg2.connect(db_url)
             df = pd.read_sql(query, conn)
