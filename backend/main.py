@@ -6,16 +6,24 @@ import psycopg2
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, status, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Pipeline & Module Imports
-from sih_6_2 import run_pipeline
+from pipeline import run_full_pipeline
 from resolution import run_resolution
-from graph_analysis import GraphAnalyzer
+from Graph2_analysis import GraphAnalyzer
 from evidence_engine import build_alerts_from_detection_results
-from lyzr_chat import call_lyzr_agent
+
 
 app = FastAPI(title="UNRAVEL Criminal Network Router")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -99,30 +107,13 @@ def validate_required_files(resolved_targets: list[str]) -> list[str]:
     return sorted(required - set(resolved_targets))
 
 
-# --- Pydantic Schema for Chat ---
-class ChatRequest(BaseModel):
-    message: str
-    user_id: str = "aniruddhasharma141104@gmail.com"
-    session_id: str = "6aabf939be73873d04ecd627-950i7xmw"
+
 
 
 # --- API Routes ---
 @app.get("/")
 def health():
     return {"status": "ok"}
-
-
-@app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
-    try:
-        response_data = await call_lyzr_agent(
-            message=request.message,
-            user_id=request.user_id,
-            session_id=request.session_id
-        )
-        return response_data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/upload", status_code=status.HTTP_200_OK)
@@ -152,23 +143,17 @@ async def route_raw_files(
 
         resolved_targets = normalize_filenames(extracted_files)
         missing = validate_required_files(resolved_targets)
+        
         if missing:
             raise ValueError(
                 f"Missing required file(s) for: {', '.join(missing)}. "
                 f"Uploaded files were: {', '.join(extracted_files)}"
             )
 
-        extracted_results = run_pipeline(data_dir=".")
-        write_logbook(db, filename, "PROCESSED_SUCCESSFULLY")
+# Temporarily disabled — we are testing graph analysis first
+        raise ValueError("Upload route temporarily disabled while testing graph analysis.")
 
-        return {
-            "status": "SUCCESS",
-            "message": f"Successfully unpacked and executed module for {filename}",
-            "retained_test_files": extracted_files,
-            "resolved_files": resolved_targets,
-            "data_count": len(extracted_results),
-            "data": extracted_results
-        }
+        write_logbook(db, filename, "PROCESSED_SUCCESSFULLY")
 
     except Exception as err:
         write_logbook(db, filename, "FAILED", str(err))
@@ -178,13 +163,17 @@ async def route_raw_files(
         )
 
 
+
 @app.post("/api/analyze-graph", status_code=status.HTTP_200_OK)
 async def run_graph_analysis():
     """
-    Fetches raw relationships from PostgreSQL, applies entity resolution 
-    for name deduplication, builds NetworkX graph, executes detections, 
-    and returns structured alerts with evidence snippets.
+    Fetch relationships from PostgreSQL,
+    perform entity resolution,
+    build NetworkX graph,
+    run detections,
+    and return graph data for React.
     """
+
     if not DATABASE_URL:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -192,11 +181,25 @@ async def run_graph_analysis():
         )
 
     try:
-        # 1. Fetch raw relationship rows from DB
+
+        # ============================================================
+        # 1. Create GraphAnalyzer
+        # ============================================================
+
         analyzer = GraphAnalyzer(db_config=DATABASE_URL)
+
+
+        # ============================================================
+        # 2. Fetch relationships from PostgreSQL
+        # ============================================================
+
         raw_df = analyzer._fetch_relationships_from_db()
 
-        # 2. Map DB column headers to match Entity Resolution input expectations
+
+        # ============================================================
+        # 3. Prepare data for Entity Resolution
+        # ============================================================
+
         mapped_df = raw_df.rename(columns={
             "source_entity_id": "Name A",
             "target_entity_id": "Name B",
@@ -206,10 +209,18 @@ async def run_graph_analysis():
             "confidence": "Confidence"
         })
 
-        # 3. Run Entity Resolution to canonicalize entity IDs & display names
+
+        # ============================================================
+        # 4. Perform Entity Resolution
+        # ============================================================
+
         resolved_df, name_lookup = run_resolution(mapped_df)
 
-        # 4. Map back to NetworkX schema before graph construction
+
+        # ============================================================
+        # 5. Prepare resolved data for NetworkX
+        # ============================================================
+
         graph_df = resolved_df.rename(columns={
             "Name A": "source_entity_id",
             "Name B": "target_entity_id",
@@ -219,27 +230,96 @@ async def run_graph_analysis():
             "Confidence": "confidence"
         })
 
-        # 5. Load resolved data into NetworkX & perform detections
+
+        # ============================================================
+        # 6. Build NetworkX graph
+        # ============================================================
+
         analyzer.load_from_dataframe(graph_df)
+
+
+        # ============================================================
+        # 7. Run NetworkX detection rules
+        # ============================================================
+
         detection_results = analyzer.run_all_detections()
 
-        # 6. Generate structured alert cards using evidence engine
+
+        # ============================================================
+        # 8. Generate evidence-based alerts
+        # ============================================================
+
         alerts = build_alerts_from_detection_results(
-            detection_results, 
+            detection_results,
             entity_name_lookup=name_lookup
         )
 
+
+        # ============================================================
+        # 9. Convert NetworkX nodes into JSON
+        # ============================================================
+
+        nodes = []
+
+        for node in analyzer.G.nodes():
+
+            nodes.append({
+                "id": str(node),
+                "label": str(node)
+            })
+
+
+        # ============================================================
+        # 10. Convert NetworkX edges into JSON
+        # ============================================================
+
+        edges = []
+
+        for index, (source, target, data) in enumerate(
+            analyzer.G.edges(data=True)
+        ):
+
+            edges.append({
+                "id": f"edge-{index}",
+                "source": str(source),
+                "target": str(target),
+                "relation": data.get("relation"),
+                "confidence": data.get("confidence"),
+                "source_doc": data.get("source_doc"),
+                "context": data.get("context")
+            })
+
+
+        # ============================================================
+        # 11. Send graph + alerts to React
+        # ============================================================
+
         return {
             "status": "SUCCESS",
+
             "nodes_count": analyzer.G.number_of_nodes(),
+
             "edges_count": analyzer.G.number_of_edges(),
+
+            "nodes": nodes,
+
+            "edges": edges,
+
             "alerts_count": len(alerts),
+
             "alerts": alerts,
+
             "raw_analysis": detection_results
         }
 
+
     except Exception as e:
+
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Graph analysis failed: {str(e)}",
+            detail=f"Graph analysis failed: {str(e)}"
         )
+
+    
+   
+    
