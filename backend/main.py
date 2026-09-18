@@ -17,6 +17,28 @@ load_dotenv()
 # Get the Neon connection URL from .env
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from lyzr_chat import call_lyzr_agent
+
+app = FastAPI()
+
+class ChatRequest(BaseModel):
+    message: str
+    user_id: str = "aniruddhasharma141104@gmail.com"
+    session_id: str = "6aabf939be73873d04ecd627-950i7xmw"
+
+@app.post("/api/chat")
+async def chat_endpoint(request: ChatRequest):
+    try:
+        response_data = await call_lyzr_agent(
+            message=request.message,
+            user_id=request.user_id,
+            session_id=request.session_id
+        )
+        return response_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -220,3 +242,4 @@ async def run_graph_analysis():
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Graph analysis failed: {str(e)}",
         )
+   
