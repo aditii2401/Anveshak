@@ -129,12 +129,12 @@ def run_pipeline(data_dir: str = "."):
         key = (r["source_id"], pair_key)
         if key not in merged:
             merged[key] = {
-                "Name A": pair_key[0],
-                "Name B": pair_key[1],
-                "Relation": {r["relation"]},
-                "Source ID": r["source_id"],
-                "Context": {r["context"]},
-                "Confidence": r["confidence"]
+                "source_entity_id": pair_key[0],
+                "target_entity_id": pair_key[1],
+                "relationship_type": {r["relation"]},
+                "source_document_id": r["source_id"],
+                "context": {r["context"]},
+                "confidence": r["confidence"]
             }
         else:
             merged[key]["Relation"].add(r["relation"])
