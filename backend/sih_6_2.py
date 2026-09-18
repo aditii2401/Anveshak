@@ -7,7 +7,7 @@ from collections import defaultdict
 import spacy
 from dotenv import load_dotenv
 
-# Load environment variables (such as GEMINI_API_KEY if needed)
+# Load environment variables
 load_dotenv()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -17,6 +17,37 @@ try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
     nlp = None
+
+
+def normalize_row_keys(row: dict) -> dict:
+    """
+    Normalizes CSV row keys to handle alternative column names cleanly.
+    """
+    normalized = {}
+    mappings = {
+        # Person ID mappings
+        'person_id': 'person_id', 'id': 'person_id', 'owner_id': 'owner_id', 'owner': 'owner_id',
+        # Name mappings
+        'name': 'name', 'person_name': 'name', 'full_name': 'name',
+        # Phone mappings
+        'phone_number': 'phone_number', 'phone': 'phone_number', 'mobile': 'phone_number',
+        'caller_phone': 'caller_phone', 'caller': 'caller_phone', 'from_phone': 'caller_phone',
+        'receiver_phone': 'receiver_phone', 'receiver': 'receiver_phone', 'to_phone': 'receiver_phone',
+        # Account / Transaction mappings
+        'account_id': 'account_id', 'acc_id': 'account_id', 'account': 'account_id',
+        'sender_account': 'sender_account', 'sender': 'sender_account', 'from_acc': 'sender_account',
+        'receiver_account': 'receiver_account', 'receiver': 'receiver_account', 'to_acc': 'receiver_account',
+        'amount_inr': 'amount_inr', 'amount': 'amount_inr', 'txn_amount': 'amount_inr'
+    }
+
+    for key, val in row.items():
+        if key is None:
+            continue
+        clean_key = key.strip().lower()
+        target_key = mappings.get(clean_key, clean_key)
+        normalized[target_key] = val.strip() if isinstance(val, str) else val
+
+    return normalized
 
 
 def run_pipeline(data_dir: str = "."):
@@ -36,7 +67,9 @@ def run_pipeline(data_dir: str = "."):
     if os.path.exists(persons_file):
         with open(persons_file, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                person_id_to_name[row["person_id"].strip()] = row["name"].strip()
+                norm_row = normalize_row_keys(row)
+                if "person_id" in norm_row and "name" in norm_row:
+                    person_id_to_name[norm_row["person_id"]] = norm_row["name"]
 
     # 2. Extract Relations from FIR Text
     fir_rows = []
@@ -54,7 +87,7 @@ def run_pipeline(data_dir: str = "."):
                     "person_2": entities[i + 1],
                     "relation": "ASSOCIATED_FIR",
                     "source_id": "FIR_TEXT",
-                    "context": f"Mentioned together in FIR report.",
+                    "context": "Mentioned together in FIR report.",
                     "confidence": 0.85
                 })
 
@@ -64,19 +97,22 @@ def run_pipeline(data_dir: str = "."):
         phone_to_name = {}
         with open(phones_file, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                name = person_id_to_name.get(row["person_id"].strip())
-                if name:
-                    phone_to_name[row["phone_number"].strip()] = name
+                norm_row = normalize_row_keys(row)
+                name = person_id_to_name.get(norm_row.get("person_id", ""))
+                phone = norm_row.get("phone_number")
+                if name and phone:
+                    phone_to_name[phone] = name
 
         calls_by_pair = defaultdict(list)
         with open(cdr_file, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                caller = phone_to_name.get(row["caller_phone"].strip())
-                receiver = phone_to_name.get(row["receiver_phone"].strip())
+                norm_row = normalize_row_keys(row)
+                caller = phone_to_name.get(norm_row.get("caller_phone", ""))
+                receiver = phone_to_name.get(norm_row.get("receiver_phone", ""))
                 if not caller or not receiver or caller == receiver:
                     continue
                 pair = tuple(sorted([caller, receiver]))
-                calls_by_pair[pair].append(row)
+                calls_by_pair[pair].append(norm_row)
 
         for pair, calls in calls_by_pair.items():
             count = len(calls)
@@ -98,28 +134,38 @@ def run_pipeline(data_dir: str = "."):
         account_to_name = {}
         with open(accounts_file, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                name = person_id_to_name.get(row["owner_id"].strip())
-                if name:
-                    account_to_name[row["account_id"].strip()] = name
+                norm_row = normalize_row_keys(row)
+                name = person_id_to_name.get(norm_row.get("owner_id", ""))
+                acc_id = norm_row.get("account_id")
+                if name and acc_id:
+                    account_to_name[acc_id] = name
 
         with open(transactions_file, "r", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                sender = account_to_name.get(row["sender_account"].strip())
-                receiver = account_to_name.get(row["receiver_account"].strip())
+                norm_row = normalize_row_keys(row)
+                sender = account_to_name.get(norm_row.get("sender_account", ""))
+                receiver = account_to_name.get(norm_row.get("receiver_account", ""))
                 if not sender or not receiver or sender == receiver:
                     continue
-                amount = float(row.get("amount_inr", 0))
+                
+                try:
+                    amount = float(norm_row.get("amount_inr", 0))
+                except ValueError:
+                    amount = 0.0
+
                 confidence = min(0.95, 0.50 + (amount / 50000.0))
+                source_id = norm_row.get("source_id", "BANK_TXN")
+                
                 txn_rows.append({
                     "person_1": sender,
                     "person_2": receiver,
                     "relation": "TRANSFERRED_FUNDS",
-                    "source_id": row.get("source_id", "BANK_TXN").strip(),
+                    "source_id": source_id,
                     "context": f"Transferred INR {amount} from {sender} to {receiver}",
                     "confidence": round(confidence, 2)
                 })
 
-    # 5. Deduplicate and Merge Results
+    # 5. Deduplicate and Merge Results safely
     all_rows = fir_rows + cdr_rows + txn_rows
     merged = {}
     for r in all_rows:
@@ -127,6 +173,7 @@ def run_pipeline(data_dir: str = "."):
             continue
         pair_key = tuple(sorted([r["person_1"], r["person_2"]]))
         key = (r["source_id"], pair_key)
+        
         if key not in merged:
             merged[key] = {
                 "source_entity_id": pair_key[0],
@@ -137,9 +184,9 @@ def run_pipeline(data_dir: str = "."):
                 "confidence": r["confidence"]
             }
         else:
-            merged[key]["Relation"].add(r["relation"])
-            merged[key]["Context"].add(r["context"])
-            merged[key]["Confidence"] = max(merged[key]["Confidence"], r["confidence"])
+            merged[key]["relationship_type"].add(r["relation"])
+            merged[key]["context"].add(r["context"])
+            merged[key]["confidence"] = max(merged[key]["confidence"], r["confidence"])
 
     final_rows = []
     for v in merged.values():
@@ -157,6 +204,5 @@ def run_pipeline(data_dir: str = "."):
 
 
 if __name__ == "__main__":
-    # Test execution locally via Python CLI
     output = run_pipeline(".")
     print(f"Pipeline finished execution. Extracted {len(output)} records.")

@@ -2,17 +2,17 @@
 graph_analysis.py
 Project: Anveshak
 
-Module  - Database & Graph
+Module - Database & Graph
 Build the NetworkX graph from stored relationships (PostgreSQL),
 run centrality/path/component/community analysis, and implement the four
 detection rules (communication spike, circular money flow, bridge entity,
 multi-source crossover).
-
 """
 
 import pandas as pd
 import networkx as nx
 import numpy as np
+import re
 from networkx.algorithms import community
 
 try:
@@ -29,11 +29,9 @@ class GraphAnalyzer:
     Two ways to load data:
       1. From PostgreSQL  -> GraphAnalyzer(db_config={...})
       2. From a local CSV -> GraphAnalyzer(csv_path="relationships_seed.csv")
-         (useful for local dev/testing before the DB is wired up)
     """
 
     def __init__(self, db_config=None, csv_path=None):
-        
         self.db_config = db_config
         self.csv_path = csv_path
         self.G = None          # MultiDiGraph - full graph, all relation types
@@ -43,7 +41,6 @@ class GraphAnalyzer:
     # DATA LOADING
     # ------------------------------------------------------------------
     def _fetch_relationships_from_db(self):
-      
         if not PSYCOPG2_AVAILABLE:
             raise ImportError("psycopg2 is not installed. Run: pip install psycopg2-binary")
 
@@ -54,7 +51,6 @@ class GraphAnalyzer:
         """
         import os
         try:
-            
             db_url = self.db_config if isinstance(self.db_config, str) else os.getenv("DATABASE_URL")
             conn = psycopg2.connect(db_url)
             df = pd.read_sql(query, conn)
@@ -67,27 +63,21 @@ class GraphAnalyzer:
         return pd.read_csv(self.csv_path)
         
     def load_from_dataframe(self, resolved_df):
-    
         required_cols = {
-        "source_entity_id",
-        "target_entity_id",
-        "type",
-        "confidence",
-        "source_document_id",
-        "context"
+            "source_entity_id",
+            "target_entity_id",
+            "type",
+            "confidence",
+            "source_document_id",
+            "context"
         }
 
         missing = required_cols - set(resolved_df.columns)
-
         if missing:
-            raise ValueError(
-                f"Relationship DataFrame is missing required columns: {missing}"
-            )
+            raise ValueError(f"Relationship DataFrame is missing required columns: {missing}")
 
         G = nx.MultiDiGraph()
-
         for _, row in resolved_df.iterrows():
-
             if pd.isna(row["source_entity_id"]) or pd.isna(row["target_entity_id"]):
                 continue
 
@@ -102,19 +92,16 @@ class GraphAnalyzer:
 
         self.G = G
         self.G_simple = nx.Graph(G)
-
         return self.G
+
     # ------------------------------------------------------------------
     # GRAPH CONSTRUCTION
     # ------------------------------------------------------------------
     def build_graph(self):
-        
         if self.db_config is not None:
             rel_df = self._fetch_relationships_from_db()
-
         elif self.csv_path is not None:
             rel_df = self._fetch_relationships_from_csv()
-
         else:
             rel_df = self._fetch_relationships_from_csv()
 
@@ -127,7 +114,7 @@ class GraphAnalyzer:
         G = nx.MultiDiGraph()
         for _, row in rel_df.iterrows():
             if pd.isna(row["source_entity_id"]) or pd.isna(row["target_entity_id"]):
-                continue  # skip malformed rows rather than crashing the whole build
+                continue
             G.add_edge(
                 row["source_entity_id"], row["target_entity_id"],
                 relation=row["type"],
@@ -137,7 +124,7 @@ class GraphAnalyzer:
             )
 
         self.G = G
-        self.G_simple = nx.Graph(G)  # collapsed undirected version for centrality/components
+        self.G_simple = nx.Graph(G)
         return self.G
 
     def _check_graph_built(self):
@@ -145,26 +132,17 @@ class GraphAnalyzer:
             raise RuntimeError("Graph not built yet. Call build_graph() first.")
 
     # ------------------------------------------------------------------
-    # ANALYSIS: DEGREE 
+    # ANALYSIS METRICS
     # ------------------------------------------------------------------
     def get_degree(self):
-        """Returns (in_degree_dict, out_degree_dict, total_degree_dict)."""
         self._check_graph_built()
         return dict(self.G.in_degree()), dict(self.G.out_degree()), dict(self.G.degree())
 
-    # ------------------------------------------------------------------
-    # ANALYSIS: BETWEENNESS CENTRALITY
-    # ------------------------------------------------------------------
     def get_betweenness(self):
-        """Returns {node: betweenness_score}, computed on the undirected simple graph."""
         self._check_graph_built()
         return nx.betweenness_centrality(self.G_simple)
 
-    # ------------------------------------------------------------------
-    # ANALYSIS: SHORTEST PATH 
-    # ------------------------------------------------------------------
     def get_shortest_path(self, source, target):
-        """Returns (path_list, hop_count) or (None, None) if no path exists."""
         self._check_graph_built()
         if not nx.has_path(self.G, source, target):
             return None, None
@@ -172,46 +150,37 @@ class GraphAnalyzer:
         length = nx.shortest_path_length(self.G, source=source, target=target)
         return path, length
 
-    # ------------------------------------------------------------------
-    # ANALYSIS: CONNECTED COMPONENTS
-    # ------------------------------------------------------------------
     def get_connected_components(self):
-        """Returns a list of sets - each set is one connected group of entities."""
         self._check_graph_built()
         return list(nx.connected_components(self.G_simple))
 
-    # ------------------------------------------------------------------
-    # ANALYSIS: COMMUNITY DETECTION 
-    # ------------------------------------------------------------------
     def get_communities(self):
-        """Returns a list of frozensets - tighter sub-clusters within components."""
         self._check_graph_built()
         return list(community.greedy_modularity_communities(self.G_simple))
 
     # ------------------------------------------------------------------
-    # DETECTION RULE 1: CIRCULAR MONEY FLOW 
+    # DETECTION RULE 1: CIRCULAR MONEY FLOW (UPDATED)
     # ------------------------------------------------------------------
     def detect_circular_flow(self):
         """
-        Finds closed directed loops among TRANSFERRED (financial) edges only.
+        Finds closed directed loops among transfer edges (TRANSFERRED or TRANSFERRED_FUNDS).
         Returns a list of cycles, each cycle a list of entity IDs.
         """
         self._check_graph_built()
         money_graph = nx.DiGraph()
+        target_relations = {"TRANSFERRED", "TRANSFERRED_FUNDS"}
+
         for u, v, data in self.G.edges(data=True):
-            if data.get("relation") == "TRANSFERRED":
+            rel_type = str(data.get("relation", "")).upper()
+            if any(tr in rel_type for tr in target_relations):
                 money_graph.add_edge(u, v)
+
         return list(nx.simple_cycles(money_graph))
 
     # ------------------------------------------------------------------
-    # DETECTION RULE 2: BRIDGE ENTITY 
+    # DETECTION RULE 2: BRIDGE ENTITY
     # ------------------------------------------------------------------
     def detect_bridges(self, percentile=75):
-        """
-        Flags entities in the top `percentile` of betweenness centrality
-        (and score > 0, to exclude non-bridges even if threshold is near zero).
-        Returns {entity_id: betweenness_score}.
-        """
         self._check_graph_built()
         bc = self.get_betweenness()
         if not bc:
@@ -220,49 +189,101 @@ class GraphAnalyzer:
         return {n: s for n, s in bc.items() if s >= threshold and s > 0}
 
     # ------------------------------------------------------------------
-    # DETECTION RULE 3: COMMUNICATION SPIKE 
+    # DETECTION RULE 3: COMMUNICATION SPIKE (UPDATED)
     # ------------------------------------------------------------------
-    def detect_comm_spikes(self, spike_marker="SPIKE"):
+    def detect_comm_spikes(self, spike_marker="SPIKE", min_calls=5):
         """
-        Flags CONTACTED edges whose source document is marked as a spike case.
-        NOTE: this is a placeholder rule for seed/demo data where spikes are
-        pre-labeled in source_document_id. For real CDR data, replace this with
-        a z-score/time-window calculation over raw call timestamps.
-        Returns a list of (source, target, edge_data) tuples.
+        Detect unusually high communication volume.
+
+        A communication edge is flagged when:
+        1. relationship type is COMMUNICATED_SPIKE, OR
+        2. source document contains a SPIKE marker, OR
+        3. context contains a call count >= min_calls.
         """
         self._check_graph_built()
         flagged = []
+
         for u, v, data in self.G.edges(data=True):
-            if data.get("relation") == "CONTACTED" and spike_marker in str(data.get("source_doc", "")):
+            rel_type = str(data.get("relation", "")).upper()
+            source_doc = str(data.get("source_doc", "")).upper()
+            context = str(data.get("context", ""))
+
+            is_spike = "COMMUNICATED_SPIKE" in rel_type
+
+            if not is_spike:
+                is_spike = (
+                    ("CONTACTED" in rel_type or "COMMUNICATED" in rel_type)
+                    and spike_marker.upper() in source_doc
+                )
+
+            if not is_spike:
+                match = re.search(r"(\d+)\s+call", context, re.IGNORECASE)
+                if match:
+                    is_spike = int(match.group(1)) >= min_calls
+
+            if is_spike:
                 flagged.append((u, v, data))
+
         return flagged
 
     # ------------------------------------------------------------------
-    # DETECTION RULE 4: MULTI-SOURCE CROSSOVER 
+    # DETECTION RULE 4: MULTI-SOURCE CROSSOVER
     # ------------------------------------------------------------------
     def detect_crossover(self):
         """
-        Flags entities that appear in edges sourced from more than one
-        distinct document type (e.g. both FIR and financial records).
-        Returns {entity_id: set_of_source_prefixes}.
+        Detect entities appearing across multiple independent source types.
+
+        Project source IDs can be FIR_TEXT, CDR_LOGS, BANK_TXN, etc.
+        They are normalized to FIR, CDR and FIN.
         """
         self._check_graph_built()
         node_sources = {}
+
+        def classify_source(source_doc, relation):
+            source = str(source_doc).upper()
+            relation = str(relation).upper()
+
+            if "FIR" in source:
+                return "FIR"
+
+            if (
+                "CDR" in source
+                or "CALL" in source
+                or "COMMUNICATED" in relation
+                or "CONTACTED" in relation
+            ):
+                return "CDR"
+
+            if (
+                "FIN" in source
+                or "BANK" in source
+                or "TXN" in source
+                or "TRANSACTION" in source
+                or "TRANSFERRED" in relation
+            ):
+                return "FIN"
+
+            return source.split("_")[0] if source else "UNKNOWN"
+
         for u, v, data in self.G.edges(data=True):
-            source_doc = str(data.get("source_doc", ""))
-            prefix = source_doc.split("_")[0] if source_doc else "UNKNOWN"
+            source_type = classify_source(
+                data.get("source_doc", ""),
+                data.get("relation", "")
+            )
+
             for node in (u, v):
-                node_sources.setdefault(node, set()).add(prefix)
-        return {n: s for n, s in node_sources.items() if len(s) > 1}
+                node_sources.setdefault(node, set()).add(source_type)
+
+        return {
+            node: sources
+            for node, sources in node_sources.items()
+            if len(sources) >= 2
+        }
 
     # ------------------------------------------------------------------
-    # RUN EVERYTHING AT ONCE - convenient for pipeline integration
+    # PIPELINE ENTRY POINT
     # ------------------------------------------------------------------
     def run_all_detections(self):
-        """
-        Runs all four detection rules and returns a single structured dict.
-        This is the main entry point the orchestration layer should call.
-        """
         self._check_graph_built()
         return {
             "circular_flow": self.detect_circular_flow(),
@@ -270,36 +291,6 @@ class GraphAnalyzer:
             "comm_spikes": self.detect_comm_spikes(),
             "crossover": self.detect_crossover(),
         }
-
-
-# ==========================================================================
-# DEMO / LOCAL TEST - only runs if this file is executed directly,
-# not when imported by a teammate's code
-# ==========================================================================
-if __name__ == "__main__":
-    # For local testing, use the CSV. Once DB schema is live, swap to:
-    # analyzer = GraphAnalyzer(db_config={
-    #     "host": "localhost", "dbname": "database",
-    #     "user": "postgres", "password": "your_password"
-    # })
-    analyzer = GraphAnalyzer(csv_path=r"E:\SIH26\data\relationships_seed.csv")
-    analyzer.build_graph()
-
-    print("Nodes:", analyzer.G.number_of_nodes())
-    print("Edges:", analyzer.G.number_of_edges())
-    print()
-
-    in_deg, out_deg, total_deg = analyzer.get_degree()
-    print("Top in-degree:", sorted(in_deg.items(), key=lambda x: x[1], reverse=True)[:3])
-    print()
-
-    print("Connected components:", len(analyzer.get_connected_components()))
-    print("Communities found:", len(analyzer.get_communities()))
-    print()
-
-    results = analyzer.run_all_detections()
-    for rule_name, output in results.items():
-        print(f"{rule_name}: {output}")
 
 # OUTPUT
 # Nodes: 18
