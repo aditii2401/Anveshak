@@ -2,7 +2,6 @@ import io
 import os
 import shutil
 import zipfile
-import psycopg2
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, status, Depends
@@ -10,6 +9,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 # Pipeline & Module Imports
+import db
 from sih_6_2 import run_pipeline
 from resolution import run_resolution
 from graph_analysis import GraphAnalyzer
@@ -30,7 +30,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Database Connection Dependency ---
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = db.get_connection()
     try:
         yield conn
     finally:
@@ -44,31 +44,16 @@ def init_db():
         print("WARNING: DATABASE_URL is not set in .env")
         return
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS audit_ingestion_logs (
-                    id SERIAL PRIMARY KEY,
-                    file_name VARCHAR(255) NOT NULL,
-                    status VARCHAR(50) NOT NULL,
-                    error_message TEXT,
-                    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-        conn.commit()
-        conn.close()
-        print("Successfully initialized audit table in Neon database.")
+        conn = db.get_connection()
+        conn.close()  # Just verify we can connect
+        print("Successfully connected to Neon database.")
     except Exception as e:
-        print(f"Error initializing Neon database: {e}")
+        print(f"Error connecting to Neon database: {e}")
 
 
 def write_logbook(db_conn, filename: str, status_msg: str, error_msg: str = None):
-    query = """
-        INSERT INTO audit_ingestion_logs (file_name, status, error_message, ingested_at)
-        VALUES (%s, %s, %s, NOW());
-    """
     with db_conn.cursor() as cursor:
-        cursor.execute(query, (filename, status_msg, error_msg))
+        db.log_ingestion(cursor, filename, status_msg, error_msg)
     db_conn.commit()
 
 
@@ -135,7 +120,7 @@ async def chat_endpoint(request: ChatRequest):
 @app.post("/api/upload", status_code=status.HTTP_200_OK)
 async def route_raw_files(
     file: UploadFile = File(...),
-    db = Depends(get_db)
+    db_conn = Depends(get_db)
 ):
     filename = file.filename
     ext = os.path.splitext(filename)[1].lower()
@@ -165,20 +150,21 @@ async def route_raw_files(
                 f"Uploaded files were: {', '.join(extracted_files)}"
             )
 
-        extracted_results = run_pipeline(data_dir=".")
-        write_logbook(db, filename, "PROCESSED_SUCCESSFULLY")
+        with db_conn.cursor() as cur:
+            extraction_summary = run_pipeline(cur, data_dir=".")
+        db_conn.commit()
+        write_logbook(db_conn, filename, "PROCESSED_SUCCESSFULLY")
 
         return {
             "status": "SUCCESS",
             "message": f"Successfully unpacked and executed module for {filename}",
             "retained_test_files": extracted_files,
             "resolved_files": resolved_targets,
-            "data_count": len(extracted_results),
-            "data": extracted_results
+            "extraction_summary": extraction_summary
         }
 
     except Exception as err:
-        write_logbook(db, filename, "FAILED", str(err))
+        write_logbook(db_conn, filename, "FAILED", str(err))
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Pipeline execution error: {str(err)}"
